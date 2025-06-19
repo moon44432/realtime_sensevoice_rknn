@@ -1,74 +1,246 @@
----
-license: agpl-3.0
-language:
-- en
-- zh
-- ja
-- ko
-base_model: lovemefan/SenseVoice-onnx
-tags:
-- rknn
----
+import os
+import time
+import logging
+import re
+print(f"Initial logging._nameToLevel: {logging._nameToLevel}")
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 
-# SenseVoiceSmall-RKNN2
+import soundfile as sf
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-SenseVoice is an audio foundation model with audio understanding capabilities, including Automatic Speech Recognition (ASR), Language Identification (LID), Speech Emotion Recognition (SER), and Acoustic Event Classification (AEC) or Acoustic Event Detection (AED).
+# Ensure sensevoice_rknn.py is in the same directory or PYTHONPATH
+# Add the directory of this script to sys.path if sensevoice_rknn is not found directly
+import sys
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.append(str(SCRIPT_DIR))
 
-Currently, SenseVoice-small supports multilingual speech recognition, emotion recognition, and event detection for Chinese, Cantonese, English, Japanese, and Korean, with extremely low inference latency.
+try:
+    from sensevoice_rknn import WavFrontend, SenseVoiceInferenceSession, FSMNVad, languages
+except ImportError as e:
+    logging.error(f"Error importing from sensevoice_rknn.py: {e}")
+    logging.error("Please ensure sensevoice_rknn.py is in the same directory as server.py or in your PYTHONPATH.")
+    # Fallback for critical components if import fails, to allow FastAPI to at least start and show an error
+    class WavFrontend:
+        def __init__(self, *args, **kwargs): raise NotImplementedError("WavFrontend not loaded")
+        def get_features(self, *args, **kwargs): raise NotImplementedError("WavFrontend not loaded")
+    class SenseVoiceInferenceSession:
+        def __init__(self, *args, **kwargs): raise NotImplementedError("SenseVoiceInferenceSession not loaded")
+        def __call__(self, *args, **kwargs): raise NotImplementedError("SenseVoiceInferenceSession not loaded")
+    class FSMNVad:
+        def __init__(self, *args, **kwargs): raise NotImplementedError("FSMNVad not loaded")
+        def segments_offline(self, *args, **kwargs): raise NotImplementedError("FSMNVad not loaded")
+        class Vad:
+            def all_reset_detection(self, *args, **kwargs): raise NotImplementedError("FSMNVad not loaded")
+        vad = Vad()
 
-- Inference speed (RKNN2): About 20x real-time on a single NPU core of RK3588 (processing 20 seconds of audio per second), approximately 6 times faster than the official whisper model provided in the rknn-model-zoo.
-- Memory usage (RKNN2): About 1.1GB
+    languages = {"en": 4} # Default fallback
 
-## Usage
+app = FastAPI()
 
-1. Clone the project to your local machine
+# Logging will be handled by Uvicorn's default configuration or a custom log_config if provided to uvicorn.run
+# Get a logger instance for application-specific logs if needed
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO) # Set level for this specific logger
 
-2. Install dependencies
+# --- Model Configuration & Loading ---
+MODEL_BASE_PATH = Path(__file__).resolve().parent
 
-```bash
-pip install kaldi_native_fbank onnxruntime sentencepiece soundfile pyyaml numpy<2
+# These paths should match those used in sensevoice_rknn.py's main function
+# or be configurable if they differ.
+MVN_PATH = MODEL_BASE_PATH / "am.mvn"
+EMBEDDING_NPY_PATH = MODEL_BASE_PATH / "embedding.npy"
+ENCODER_RKNN_PATH = MODEL_BASE_PATH / "sense-voice-encoder.rknn"
+BPE_MODEL_PATH = MODEL_BASE_PATH / "chn_jpn_yue_eng_ko_spectok.bpe.model"
+VAD_CONFIG_DIR = MODEL_BASE_PATH # Assuming fsmn-config.yaml and fsmnvad-offline.onnx are here
 
-pip install rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-```
-[Source](https://github.com/airockchip/rknn-toolkit2/blob/master/rknn-toolkit-lite2/packages/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl) of the .whl file:
+# Global model instances
+w_frontend: Optional[WavFrontend] = None
+asr_model: Optional[SenseVoiceInferenceSession] = None
+vad_model: Optional[FSMNVad] = None
 
-3. Copy librknnt.so to /usr/lib/
+@app.on_event("startup")
+def load_models():
+    global w_frontend, asr_model, vad_model
+    logging.info("Loading models...")
+    start_time = time.time()
+    try:
+        if not MVN_PATH.exists():
+            raise FileNotFoundError(f"CMVN file not found: {MVN_PATH}")
+        w_frontend = WavFrontend(cmvn_file=str(MVN_PATH))
 
-Source of librknnt.so: https://github.com/airockchip/rknn-toolkit2/blob/master/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so
+        if not EMBEDDING_NPY_PATH.exists() or not ENCODER_RKNN_PATH.exists() or not BPE_MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"One or more ASR model files not found: "
+                f"Embedding: {EMBEDDING_NPY_PATH}, Encoder: {ENCODER_RKNN_PATH}, BPE: {BPE_MODEL_PATH}"
+            )
+        asr_model = SenseVoiceInferenceSession(
+            embedding_model_file=str(EMBEDDING_NPY_PATH),
+            encoder_model_file=str(ENCODER_RKNN_PATH),
+            bpe_model_file=str(BPE_MODEL_PATH),
+            # Assuming default device_id and num_threads as in sensevoice_rknn.py's main
+            device_id=-1, 
+            intra_op_num_threads=4 
+        )
 
-4. Run
+        # Check for VAD model files (fsmn-config.yaml, fsmnvad-offline.onnx)
+        if not (VAD_CONFIG_DIR / "fsmn-config.yaml").exists() or not (VAD_CONFIG_DIR / "fsmnvad-offline.onnx").exists():
+             raise FileNotFoundError(f"VAD config or model not found in {VAD_CONFIG_DIR}")
+        vad_model = FSMNVad(config_dir=str(VAD_CONFIG_DIR))
+        
+        logging.info(f"Models loaded successfully in {time.time() - start_time:.2f} seconds.")
+    except FileNotFoundError as e:
+        logging.error(f"Model loading failed: {e}")
+        # Keep models as None, endpoints will raise errors
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during model loading: {e}")
+        # Keep models as None
 
-```bash
-python ./sensevoice_rknn.py --audio_file english.wav
-```
+class TranscribeRequest(BaseModel):
+    audio_file_path: str
+    language: str = "en"  # Default to English
+    use_itn: bool = False
 
-If you find that recognition is not working correctly when testing with your own audio files, you may need to convert them to 16kHz, 16-bit, mono WAV format in advance.
+class Segment(BaseModel):
+    start_time_s: float
+    end_time_s: float
+    text: str
 
-```bash
-ffmpeg -i input.mp3 -f wav -acodec pcm_s16le -ac 1 -ar 16000 output.wav
-```
+class TranscribeResponse(BaseModel):
+    full_transcription: str
+    segments: List[Segment]
 
-## RKNN Model Conversion
+@app.post("/transcribe", response_model=str)
+async def transcribe_audio(request: TranscribeRequest):
+    if w_frontend is None or asr_model is None or vad_model is None:
+        logging.error("Models not loaded. Transcription cannot proceed.")
+        raise HTTPException(status_code=503, detail="Models are not loaded. Please check server logs.")
 
-You need to install rknn-toolkit2 v2.1.0 or higher in advance.
+    audio_path = Path(request.audio_file_path)
+    if not audio_path.exists() or not audio_path.is_file():
+        logging.error(f"Audio file not found: {audio_path}")
+        raise HTTPException(status_code=404, detail=f"Audio file not found: {audio_path}")
 
-1. Download or convert the ONNX model
+    try:
+        waveform, sample_rate = sf.read(
+            str(audio_path),
+            dtype="float32",
+            always_2d=True
+        )
+    except Exception as e:
+        logging.error(f"Error reading audio file {audio_path}: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read audio file: {e}")
 
-You can download the ONNX model from https://huggingface.co/lovemefan/SenseVoice-onnx.
-It should also be possible to convert from a PyTorch model to an ONNX model according to the documentation at https://github.com/FunAudioLLM/SenseVoice.
+    if sample_rate != 16000:
+        # Basic resampling could be added here if needed, or just raise an error
+        logging.warning(f"Audio sample rate is {sample_rate}Hz, expected 16000Hz. Results may be suboptimal.")
+        # For now, we proceed but log a warning. For critical applications, convert or reject.
 
-The model file should be named 'sense-voice-encoder.onnx' and placed in the same directory as the conversion script.
+    logging.info(f"Processing audio: {audio_path}, Duration: {len(waveform) / sample_rate:.2f}s, Channels: {waveform.shape[1]}")
 
-2. Convert to RKNN model
-```bash
-python convert_rknn.py 
-```
+    lang_code = languages.get(request.language.lower())
+    if lang_code is None:
+        logging.warning(f"Unsupported language: {request.language}. Defaulting to 'en'. Supported: {list(languages.keys())}")
+        lang_code = languages.get("en", 0) # Fallback to 'en' or 'auto' if 'en' isn't in languages
 
-## Known Issues
+    all_segments_text: List[str] = []
+    detailed_segments: List[Segment] = []
+    processing_start_time = time.time()
 
-- When using fp16 inference with RKNN2, overflow may occur, resulting in inf values. You can try modifying the scaling ratio of the input data to resolve this.  
-  Set `SPEECH_SCALE` to a smaller value in `sensevoice_rknn.py`.
+    for channel_id in range(waveform.shape[1]):
+        channel_data = waveform[:, channel_id]
+        logging.info(f"Processing channel {channel_id + 1}/{waveform.shape[1]}")
+        
+        try:
+            # Ensure channel_data is 1D for VAD if it expects that
+            speech_segments = vad_model.segments_offline(channel_data) # segments_offline expects 1D array
+        except Exception as e:
+            logging.error(f"VAD processing failed for channel {channel_id}: {e}")
+            # Optionally skip this channel or raise an error for the whole request
+            continue # Skip to next channel
 
-## References
-- [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
-- [lovemefan/SenseVoice-python](https://github.com/lovemefan/SenseVoice-python)
+        for part_idx, part in enumerate(speech_segments):
+            start_sample = int(part[0] * 16)  # VAD returns ms, convert to samples (16 samples/ms for 16kHz)
+            end_sample = int(part[1] * 16)
+            segment_audio = channel_data[start_sample:end_sample]
+
+            if len(segment_audio) == 0:
+                logging.info(f"Empty audio segment for channel {channel_id}, part {part_idx}. Skipping.")
+                continue
+            
+            try:
+                # Ensure get_features expects 1D array
+                audio_feats = w_frontend.get_features(segment_audio) 
+                # ASR model expects batch dimension, add [None, ...]
+                asr_result_text_raw = asr_model(
+                    audio_feats[None, ...],
+                    language=lang_code,
+                    use_itn=request.use_itn,
+                )
+                # Remove tags like <|en|>, <|HAPPY|>, etc.
+                asr_result_text_cleaned = re.sub(r"<\|[^\|]+\|>", "", asr_result_text_raw).strip()
+                
+                segment_start_s = part[0] / 1000.0
+                segment_end_s = part[1] / 1000.0
+                logging.info(f"[Ch{channel_id}] [{segment_start_s:.2f}s - {segment_end_s:.2f}s] Raw: {asr_result_text_raw} Cleaned: {asr_result_text_cleaned}")
+                all_segments_text.append(asr_result_text_cleaned)
+                detailed_segments.append(Segment(start_time_s=segment_start_s, end_time_s=segment_end_s, text=asr_result_text_cleaned))
+            except Exception as e:
+                logging.error(f"ASR processing failed for segment {part_idx} in channel {channel_id}: {e}")
+                # Optionally add a placeholder or skip this segment's text
+                detailed_segments.append(Segment(start_time_s=part[0]/1000.0, end_time_s=part[1]/1000.0, text="[ASR_ERROR]"))
+
+        vad_model.vad.all_reset_detection() # Reset VAD state for next channel or call
+
+    full_transcription = " ".join(all_segments_text).strip()
+    logging.info(f"Transcription complete in {time.time() - processing_start_time:.2f}s. Result: {full_transcription}")
+
+    return full_transcription
+
+if __name__ == "__main__":
+    import uvicorn
+
+    MINIMAL_LOGGING_CONFIG = {
+        "version": 1,
+        "disable_existing_loggers": False, # Let other loggers (like our app logger) exist
+        "formatters": {
+            "default": {
+                "()": "uvicorn.logging.DefaultFormatter",
+                "fmt": "%(levelprefix)s %(message)s",
+                "use_colors": None,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+        },
+        "loggers": {
+            "uvicorn": { # Uvicorn's own operational logs
+                "handlers": ["default"],
+                "level": logging.INFO, # Explicitly use integer
+                "propagate": False,
+            },
+            "uvicorn.error": { # Logs for errors within Uvicorn
+                "handlers": ["default"],
+                "level": logging.INFO, # Explicitly use integer
+                "propagate": False,
+            },
+            # We are deliberately not configuring uvicorn.access here for simplicity
+            # It might default to INFO or be silent if not configured and no parent handler catches it.
+        },
+        # Ensure our application logger also works if needed
+        __name__: {
+            "handlers": ["default"],
+            "level": logging.INFO,
+            "propagate": False,
+        }
+    }
+
+    logger.info(f"Attempting to run Uvicorn with minimal explicit log_config.")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=MINIMAL_LOGGING_CONFIG)
