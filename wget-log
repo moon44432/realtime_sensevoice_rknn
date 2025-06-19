@@ -1,0 +1,6 @@
+--2025-06-18 23:24:33--  https://storage.googleapis.com/kagglesdsdata/datasets/829978/1417968/harvard.wav?X-Goog-Algorithm=GOOG4-RSA-SHA256
+Resolving storage.googleapis.com (storage.googleapis.com)... 2607:f8b0:4008:805::201b, 2607:f8b0:4008:80e::201b, 2607:f8b0:4008:804::201b, ...
+Connecting to storage.googleapis.com (storage.googleapis.com)|2607:f8b0:4008:805::201b|:443... connected.
+HTTP request sent, awaiting response... 400 Bad Request
+2025-06-18 23:24:33 ERROR 400: Bad Request.
+

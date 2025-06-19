@@ -33,3 +33,9 @@ saved_model/**/* filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
 *.zst filter=lfs diff=lfs merge=lfs -text
 *tfevents* filter=lfs diff=lfs merge=lfs -text
+output.wav filter=lfs diff=lfs merge=lfs -text
+sense-voice-encoder.rknn filter=lfs diff=lfs merge=lfs -text
+chinese.wav filter=lfs diff=lfs merge=lfs -text
+english.wav filter=lfs diff=lfs merge=lfs -text
+librknnrt.so filter=lfs diff=lfs merge=lfs -text
+rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl filter=lfs diff=lfs merge=lfs -text
