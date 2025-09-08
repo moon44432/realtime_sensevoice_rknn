@@ -11,7 +11,7 @@ protobuf==6.31.1
 psutil==7.0.0
 pycparser==2.22
 PyYAML==6.0.2
-# rknn-toolkit-lite2 @ file:./rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+rknn-toolkit-lite2 @ file:./rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ruamel.yaml==0.18.14
 ruamel.yaml.clib==0.2.12
 sentencepiece==0.2.0
