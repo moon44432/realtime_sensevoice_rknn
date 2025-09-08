@@ -1,3 +1,5 @@
 myenv/
 transcription_log.txt
 recordings/
+*.pyc
+__pycache__/
