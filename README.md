@@ -74,6 +74,64 @@ python convert_rknn.py
 - [lovemefan/SenseVoice-python](https://github.com/lovemefan/SenseVoice-python)
 
 
+## Real-time Speech Recognition with Speaker Diarization
+
+This project includes real-time speech recognition with **speaker diarization** (화자 분리) support. The system can identify and track multiple speakers in real-time during transcription.
+
+### Features
+
+- **Real-time Speaker Identification**: Automatically detects and tracks different speakers
+- **Offline Operation**: Uses SpeechBrain's x-vector model that runs completely offline
+- **Lightweight**: Optimized for embedded devices like RK3588
+- **Per-sentence Speaker Assignment**: Each transcribed sentence is labeled with its dominant speaker
+
+### Quick Start with Speaker Diarization
+
+1. Install additional dependencies:
+```bash
+pip install torch torchaudio speechbrain
+```
+
+2. Run with speaker diarization enabled:
+```bash
+python realtime_sensevoice_client.py --enable_speaker_diarization
+```
+
+3. Or use the example script:
+```bash
+python example_speaker_diarization.py
+```
+
+### Advanced Options
+
+```bash
+python realtime_sensevoice_client.py \
+    --enable_speaker_diarization \
+    --speaker_similarity_threshold 0.75 \
+    --save_recordings \
+    --silence_threshold 0.5 \
+    --max_sentence_duration 8.0
+```
+
+**Parameters:**
+- `--enable_speaker_diarization`: Enable speaker diarization
+- `--speaker_similarity_threshold`: Similarity threshold for speaker matching (0-1, default: 0.75)
+  - Higher values = stricter speaker matching (fewer speakers created)
+  - Lower values = more lenient matching (more speakers created)
+
+### Output Example
+
+```
+[14:32:15] (2.3s) [Speaker 0] 안녕하세요
+   Token Info: {'lang': 'ko', 'emotion': 'NEUTRAL', 'speaker': 0, ...}
+
+[14:32:18] (1.8s) [Speaker 1] 네, 반갑습니다
+   Token Info: {'lang': 'ko', 'emotion': 'HAPPY', 'speaker': 1, ...}
+```
+
+For detailed documentation, see [SPEAKER_DIARIZATION.md](SPEAKER_DIARIZATION.md).
+
+
 ## FastAPI Transcription Server
 
 This project includes a FastAPI server (`server.py`) that provides an HTTP endpoint for speech-to-text transcription.

@@ -20,3 +20,6 @@ sympy==1.14.0
 noisereduce==3.0.3
 requests==2.32.4
 sounddevice==0.5.2
+torch==2.0.1
+torchaudio==2.0.2
+speechbrain==0.5.16
