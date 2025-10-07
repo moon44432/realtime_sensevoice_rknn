@@ -35,10 +35,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 class SpeakerDiarization:
     """Handles speaker embedding extraction and identification."""
     
-    def __init__(self, similarity_threshold: float = 0.5, model_name: str = "speechbrain/spkrec-ecapa-voxceleb"):
+    def __init__(self, similarity_threshold: float = 0.5, model_name: str = "speechbrain/spkrec-ecapa-voxceleb", max_speakers: int = 100):
         self.model_name = model_name
         self.similarity_threshold = similarity_threshold
-        self.speaker_embeddings = []
+        self.max_speakers = max_speakers
+        self.speaker_embeddings = {}  # Dictionary with speaker_id as key
+        self.speaker_order = []  # List to track access order (most recent first)
+        self.next_speaker_id = 0  # Counter for assigning new speaker IDs
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Load speaker embedding model
@@ -82,18 +85,24 @@ class SpeakerDiarization:
 
         if not self.speaker_embeddings:
             # First speaker
-            self.speaker_embeddings.append(embedding)
-            return 0
+            speaker_id = self.next_speaker_id
+            self.next_speaker_id += 1
+            self.speaker_embeddings[speaker_id] = embedding
+            self.speaker_order.append(speaker_id)
+            return speaker_id
 
         # Calculate similarity with existing speakers
-        similarities = cosine_similarity([embedding], self.speaker_embeddings)[0]
+        speaker_ids = list(self.speaker_embeddings.keys())
+        embeddings_list = [self.speaker_embeddings[sid] for sid in speaker_ids]
+        similarities = cosine_similarity([embedding], embeddings_list)[0]
         
         # Debugging: Print similarity scores
-        similarity_scores = {f"Speaker {i}": sim for i, sim in enumerate(similarities)}
-        print(f"   Similarity Scores: {similarity_scores}")
+        similarity_scores = {f"Speaker {speaker_ids[i]}": sim for i, sim in enumerate(similarities)}
+        print(f"Similarity Scores: {similarity_scores}")
 
         max_similarity = np.max(similarities)
-        most_similar_speaker_id = np.argmax(similarities)
+        most_similar_idx = np.argmax(similarities)
+        most_similar_speaker_id = speaker_ids[most_similar_idx]
 
         if max_similarity >= self.similarity_threshold:
             # Existing speaker, update embedding with a weighted average
@@ -103,8 +112,24 @@ class SpeakerDiarization:
             )
             # normalize
             self.speaker_embeddings[most_similar_speaker_id] /= np.linalg.norm(self.speaker_embeddings[most_similar_speaker_id])
+            
+            # Move this speaker to the front of the order list (most recently used)
+            self.speaker_order.remove(most_similar_speaker_id)
+            self.speaker_order.insert(0, most_similar_speaker_id)
+            
             return most_similar_speaker_id
         else:
             # New speaker
-            self.speaker_embeddings.append(embedding)
-            return len(self.speaker_embeddings) - 1
+            speaker_id = self.next_speaker_id
+            self.next_speaker_id += 1
+            self.speaker_embeddings[speaker_id] = embedding
+            self.speaker_order.insert(0, speaker_id)  # Add to front (most recent)
+            
+            # Check if we exceeded max speakers limit
+            if len(self.speaker_embeddings) > self.max_speakers:
+                # Remove the least recently used speaker (last in order)
+                removed_speaker_id = self.speaker_order.pop()
+                del self.speaker_embeddings[removed_speaker_id]
+                logging.info(f"Removed least recently used speaker {removed_speaker_id} (limit: {self.max_speakers})")
+            
+            return speaker_id

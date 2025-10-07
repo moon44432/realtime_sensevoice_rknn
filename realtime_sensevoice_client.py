@@ -148,7 +148,7 @@ def main():
     arg_parser.add_argument("--use_itn", action="store_true", help="Use ITN")
     arg_parser.add_argument(
         "--chunk_duration", 
-        default=0.2, 
+        default=0.3, 
         type=float, 
         help="Audio chunk duration in seconds"
     )
@@ -160,7 +160,7 @@ def main():
     )
     arg_parser.add_argument(
         "--max_sentence_duration",
-        default=8.0,
+        default=7.0,
         type=float,
         help="Maximum sentence duration in seconds"
     )

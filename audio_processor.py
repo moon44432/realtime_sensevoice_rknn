@@ -31,9 +31,9 @@ class AudioProcessor:
         language: int = 12,  # Korean by default
         use_itn: bool = False,
         sample_rate: int = 16000,
-        chunk_duration: float = 0.2,
-        silence_threshold: float = 0.3,
-        max_sentence_duration: float = 10.0,
+        chunk_duration: float = 0.3,
+        silence_threshold: float = 0.5,
+        max_sentence_duration: float = 7.0,
         save_recordings: bool = True,
         recordings_dir: str = "./recordings",
         backend_url: str = "http://localhost:8080",
@@ -63,7 +63,7 @@ class AudioProcessor:
         self.sentence_buffer = []
         self.silence_duration = 0.0
         self.last_inference_length = 0
-        self.inference_interval = 1.0  # Inference every 1.0 seconds
+        self.inference_interval = 1.25 # in seconds
         self.in_sentence = False
 
         # Audio input queue
@@ -109,13 +109,9 @@ class AudioProcessor:
             logging.error(f"Failed to initialize models: {e}")
             raise
     
-    def send_subtitle_to_backend(self, clean_text: str, token_info: dict, is_final: bool = False, speaker_id: int = -1):
+    def send_subtitle_to_backend(self, clean_text: str, token_info: dict, is_final: bool = False):
         """Send subtitle and emotion info to backend."""
         try:
-            # Calculate current time (elapsed since start)
-            current_time = time.time()
-            elapsed_time = current_time - self.start_time
-            
             # Emoji mapping by emotion
             emotion_emoji_map = {
                 "HAPPY": "😊",
@@ -143,14 +139,12 @@ class AudioProcessor:
                 "text": clean_text,
                 "emotion": token_info.get("emotion", "NEUTRAL"),
                 "language": token_info.get("lang", "ko"),
-                "timestamp": elapsed_time,
+                "timestamp": token_info.get("timestamp", datetime.now().strftime("%H:%M:%S")),
                 "is_final": is_final,
-                "emoji": emotion_emoji_map.get(token_info.get("emotion", "NEUTRAL"), "🙂"),
-                "lang_code": lang_code_map.get(token_info.get("lang"), "KR")
+                "emoji": emotion_emoji_map.get(token_info.get("emotion", "NEUTRAL"), "😐"),
+                "lang_code": lang_code_map.get(token_info.get("lang"), "KR"),
+                "speaker": int(token_info.get("speaker", -1)),
             }
-            if self.enable_speaker_diarization:
-                subtitle_data["speaker"] = int(speaker_id)
-            
             # Send to backend
             response = requests.post(
                 f"{self.backend_url}/subtitle",
@@ -276,6 +270,12 @@ class AudioProcessor:
         buffer_duration = len(self.sentence_buffer) / self.sample_rate
         return (self.silence_duration >= self.silence_threshold or 
                 buffer_duration >= self.max_sentence_duration)
+
+    def get_speaker_id(self, audio_data: np.ndarray, sample_rate: int) -> int:
+        """Get speaker ID using speaker diarization."""
+        if not self.enable_speaker_diarization:
+            return -1
+        return self.speaker_diarization.identify_speaker(audio_data, sample_rate)
     
     def finalize_sentence(self):
         """Finalize the sentence."""
@@ -298,19 +298,17 @@ class AudioProcessor:
             if len(clean_text.strip()) == 0:
                 print(f"Sentence is too short. ({clean_text})")
             else:
-                current_time = time.strftime('%H:%M:%S')
+                timestamp = datetime.now().strftime("%H:%M:%S")
                 buffer_duration = len(self.sentence_buffer) / self.sample_rate
-                
-                speaker_id = -1
-                if self.enable_speaker_diarization:
-                    speaker_id = self.speaker_diarization.identify_speaker(final_buffer, self.sample_rate)
-                    token_info['speaker'] = speaker_id
-                
-                print(f"\r[{current_time}] Finished ({buffer_duration:.1f}s): {clean_text}")
-                print(f"   Token Info: {token_info}")
+            
+                token_info['speaker'] = self.get_speaker_id(final_buffer, self.sample_rate)
+                token_info['timestamp'] = timestamp
+
+                print(f"\r[{timestamp}] Finished ({buffer_duration:.1f}s): {clean_text}")
+                print(f"Token Info: {token_info}")
                 
                 # Send final subtitle to backend
-                self.send_subtitle_to_backend(clean_text, token_info, is_final=True, speaker_id=speaker_id)
+                self.send_subtitle_to_backend(clean_text, token_info, is_final=True)
                 
                 # Call result callback
                 if hasattr(self, 'result_callback'):
@@ -381,7 +379,8 @@ class AudioProcessor:
                             # Send partial subtitle to backend (for real-time update)
                             if clean_text.strip():
                                 clean_text_full, token_info_full = self.token_parser.parse_result(partial_result)
-                                self.send_subtitle_to_backend(clean_text_full, token_info_full, is_final=False, speaker_id=-1)
+                                token_info_full['speaker'] = self.get_speaker_id(buffer_array, self.sample_rate)
+                                self.send_subtitle_to_backend(clean_text_full, token_info_full, is_final=False)
 
                         # Update next inference time
                         self.last_inference_length = len(self.sentence_buffer) / self.sample_rate
